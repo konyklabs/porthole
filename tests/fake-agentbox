@@ -24,6 +24,7 @@ Knobs for the tests, all environment variables:
     FAKE_AGENTBOX_GRANDCHILD=1    logs spawns a `sleep 300` grandchild first
     FAKE_AGENTBOX_LONG_LINE=N     logs emits one N-byte line after the third event
     FAKE_AGENTBOX_STDERR_SPAM=N   logs writes N lines of 1 KiB to stderr after the third event
+    FAKE_AGENTBOX_FAIL_STOP=1     stop-run exits 1 with a message on stderr
     FAKE_AGENTBOX_ATTACH_EXIT=N   attach exits N
     FAKE_AGENTBOX_PIDFILE=P       append "self <pid>" and "child <pid>" lines to P
 """
@@ -109,6 +110,9 @@ def main(argv):
     if command == "logs":
         return stream_logs()
     if command == "stop-run":
+        if os.environ.get("FAKE_AGENTBOX_FAIL_STOP") == "1":
+            print("limactl: run is already gone (fake failure)", file=sys.stderr)
+            return 1
         return 0
     if command == "attach":
         return int(os.environ.get("FAKE_AGENTBOX_ATTACH_EXIT", "0"))

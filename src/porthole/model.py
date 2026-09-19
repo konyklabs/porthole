@@ -26,6 +26,9 @@ TOOLCHAIN_STATES = ("ok", "findings", "unknown")
 # is a renderer that hangs the day the CLI does not.
 LEFTOVER_ENTRIES = 20
 LEFTOVER_WIDTH = 200
+# The widest count any cell will show. A box is free to report `1e999` or a 4000-digit number;
+# a column is not free to be 4000 characters wide.
+COUNT_MAX = 99_999
 
 
 @dataclass(frozen=True)
@@ -161,6 +164,12 @@ class Leftovers:
     tmux: tuple[str, ...] = ()
     runs: tuple[str, ...] = ()  # the runids that own at least one of the rows above
     truncated: bool = False
+    # How many entries the box reported, before LEFTOVER_ENTRIES clipped the lists kept above.
+    # The counts are what gets rendered, so they must be the box's number: 25 worktrees clipped
+    # to 20 entries are still 25 worktrees, and reporting 20 is a wrong number stated as a fact.
+    ports_reported: int = 0
+    worktrees_reported: int = 0
+    tmux_reported: int = 0
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> Leftovers:
@@ -171,23 +180,36 @@ class Leftovers:
             tmux=_strings(data.get("tmux")),
             runs=_strings(data.get("runs")),
             truncated=bool(data.get("truncated")),
+            ports_reported=_listed(data.get("ports")),
+            worktrees_reported=_listed(data.get("worktrees")),
+            tmux_reported=_listed(data.get("tmux")),
+        )
+
+    @property
+    def counts(self) -> tuple[int, int, int]:
+        """ports, worktrees, tmux as the box reported them, never as the clip left them."""
+        return (
+            max(self.ports_reported, len(self.ports)),
+            max(self.worktrees_reported, len(self.worktrees)),
+            max(self.tmux_reported, len(self.tmux)),
         )
 
     @property
     def total(self) -> int:
         """Resources, not attribution: `runs` names who left them, it is not a fifth kind."""
-        return self.procs + len(self.ports) + len(self.worktrees) + len(self.tmux)
+        return self.procs + sum(self.counts)
 
     @property
     def summary(self) -> str:
         """``2 processes, 1 port`` — pluralised, zeros omitted, empty when nothing survived."""
         if not self.total:
             return ""
+        ports, worktrees, tmux = self.counts
         parts = [
             _plural(self.procs, "process", "processes"),
-            _plural(len(self.ports), "port"),
-            _plural(len(self.worktrees), "worktree"),
-            _plural(len(self.tmux), "tmux session"),
+            _plural(ports, "port"),
+            _plural(worktrees, "worktree"),
+            _plural(tmux, "tmux session"),
         ]
         if self.truncated:
             parts.append("scan truncated")
@@ -265,7 +287,7 @@ class Box:
             firewall=egress_mode(data.get("firewall")),
             firewall_detail=_optional_str(data.get("firewall_detail")),
             run=Run.from_json(run) if isinstance(run, dict) else None,
-            runs_total=int(data.get("runs_total") or 0),
+            runs_total=_count(data.get("runs_total")),
             sessions=tuple(Session.from_json(s) for s in _as_list(data.get("sessions"))),
             standing=Standing.from_json(standing) if isinstance(standing, dict) else None,
             channel=Channel.from_json(channel) if isinstance(channel, dict) else None,
@@ -389,13 +411,14 @@ def _optional_str(value: Any) -> str | None:
 def _count(value: Any) -> int:
     """A count from the CLI, never an exception. A string, a float, None or a list lands on an int.
 
-    A bad cell is a bug report; a poll that raises is a blackout of the whole table.
+    A bad cell is a bug report; a poll that raises is a blackout of the whole table. `1e999` is
+    valid JSON and Python reads it as `inf`, whose `int()` raises OverflowError, not ValueError.
     """
     if isinstance(value, (list, tuple)):
-        return len(value)
+        return min(len(value), COUNT_MAX)
     try:
-        return max(0, int(value or 0))
-    except (TypeError, ValueError):
+        return min(max(0, int(value or 0)), COUNT_MAX)
+    except (TypeError, ValueError, OverflowError):
         return 0
 
 
@@ -409,6 +432,11 @@ def _strings(
 ) -> tuple[str, ...]:
     """The list's entries as clipped strings: bounded in count and in length."""
     return tuple(str(item)[:width] for item in _as_list(value)[:entries])
+
+
+def _listed(value: Any) -> int:
+    """How many entries the box sent, before `_strings` clips the list that is kept."""
+    return min(len(_as_list(value)), COUNT_MAX)
 
 
 def _plural(count: int, singular: str, plural: str | None = None) -> str:

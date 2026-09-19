@@ -139,7 +139,13 @@ def test_leftovers_total_and_summary() -> None:
     one = Leftovers.from_json({"procs": 1, "ports": ["tcp:1", "tcp:2"]})
     assert one.summary == "1 process, 2 ports"
     capped = Leftovers.from_json({"ports": [f"tcp:{n}" for n in range(40)], "truncated": True})
-    assert len(capped.ports) == 20 and capped.summary.endswith("scan truncated")
+    # The display list is clipped; the count is the box's own, or the number is a lie.
+    assert len(capped.ports) == 20 and capped.summary == "40 ports, scan truncated"
+    assert capped.total == 40
+    unmarked = Leftovers.from_json({"worktrees": [f"/home/me/dev/app/wt-{n}" for n in range(25)]})
+    assert unmarked.summary == "25 worktrees" and unmarked.total == 25
+    assert len(unmarked.worktrees) == 20  # still only 20 kept, because nothing renders them
+    assert Leftovers(worktrees=("/a", "/b")).total == 2  # built by hand: what it was given
     wide = Leftovers.from_json({"worktrees": ["/work/" + "x" * 500]})
     assert len(wide.worktrees[0]) == 200
     assert Box.from_json({**BASE, "leftovers": "nope"}).leftovers is None
@@ -199,6 +205,32 @@ def test_count_coercion() -> None:
     assert _count(["a", "b"]) == 2
     assert _count(-1) == 0  # a negative count is nonsense, never a negative cell
     assert _count("nope") == 0
+    # `1e999` is valid JSON; Python reads it as inf, and int(inf) raises OverflowError, which
+    # is neither TypeError nor ValueError. One box's guest must not black out the whole poll.
+    assert _count(float("inf")) == 0
+    assert _count(float("-inf")) == 0
+    assert _count(float("nan")) == 0
+    assert _count(10**4000) == 99999  # a count is clamped, never a 4001-character cell
+
+
+def test_a_hostile_count_does_not_raise_anywhere_in_from_json() -> None:
+    """Every count a box can reach, fed `1e999` and then a 4001-digit integer."""
+    hostile = (
+        '{{"boxes":[{{"name":"b","runs_total":{n},'
+        '"standing":{{"state":"idle","runs_unseen":{n}}},'
+        '"channel":{{"to_host_unread":{n}}},'
+        '"leftovers":{{"procs":{n}}},'
+        '"toolchain":{{"state":"findings","missing":{n}}}}}]}}'
+    )
+    infinite = Status.from_json(json.loads(hostile.format(n="1e999"))).boxes[0]
+    assert infinite.runs_total == 0 and infinite.pending == 0  # unreadable, so not a count
+    assert infinite.leftovers is not None and infinite.leftovers.procs == 0
+    assert infinite.toolchain is not None and infinite.toolchain.summary == "findings"
+    huge = Status.from_json(json.loads(hostile.format(n=10**4000))).boxes[0]
+    assert huge.runs_total == 99999 and huge.pending == 99999 * 2  # clamped, not 4001 wide
+    assert huge.toolchain is not None and huge.toolchain.summary == "99999 missing"
+    # `runs_total` used a bare int() until this round: a string there raised ValueError.
+    assert Box.from_json({**BASE, "runs_total": "x"}).runs_total == 0
 
 
 def test_box_without_repo_targets_its_name() -> None:

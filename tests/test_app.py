@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 
 import pytest
-from textual.widgets import DataTable, RichLog, Static
+from textual.widgets import DataTable, Label, RichLog, Static
 
 from porthole.app import ConfirmScreen, PortholeApp, RunsScreen
 from porthole.backend import FixtureBackend, ProcessLogFollower
@@ -825,3 +825,141 @@ async def test_poll_rerender_does_not_undo_a_keypress(fake_log: Path) -> None:
         assert table.cursor_row == 1
         assert app.selected == "mid-api"
         await wait_for(lambda: app.follow_key == ("mid-api", None))
+
+
+# ------------------------------------------------ review round: markup, counts, the one line
+
+
+def toast_texts(app: PortholeApp) -> list[str]:
+    """Each toast as one string: a toast wraps, so line 0 holds only its first words."""
+    return [
+        " ".join(t.render_line(i).text.strip() for i in range(t.size.height))
+        for t in app.query("Toast")
+    ]
+
+
+def question_text(app: PortholeApp) -> str:
+    """The confirm dialog's question as it is drawn, not as it was handed over."""
+    return app.screen.query(Label).first().render_line(0).text
+
+
+async def test_a_bracketed_runid_and_box_name_reach_the_confirm_dialog_intact(
+    fake_log: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The dialog renders two strings the box chose. `[/]` in either would raise mid-render.
+
+    The same poll proves the table's own name cell: a plain `str` cell is markup to DataTable.
+    """
+    app = build_app([])
+    async with app.run_test() as pilot:
+        await wait_for_table(app)
+        await pilot.pause()
+        status = fixture_status()
+        zeta = named(status, "zeta-tests")
+        zeta["name"] = "zeta[/]tests"
+        zeta["run"]["id"] = "20260905-101500[/][dim]x"
+        point_at(monkeypatch, tmp_path, status)
+        await pilot.press("r")
+        await wait_for(lambda: table_names(app)[0] == "zeta[/]tests")
+        await pilot.pause()
+        assert app.query_one("#boxes", DataTable).row_count == 4  # the name cell did not raise
+        await pilot.press("s")
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmScreen)
+        assert question_text(app) == "stop run 20260905-101500[/][dim]x on zeta[/]tests?"
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.is_running  # no MarkupError took the whole app down
+
+
+async def test_a_bracketed_branch_and_title_reach_the_runs_list_intact(
+    fake_log: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A runid, a model and a branch are the agent's words; the modal's title is the box's."""
+    status = fixture_status()
+    named(status, "zeta-tests")["name"] = "zeta[/]tests"
+    point_at(monkeypatch, tmp_path, status)
+    runs = json.loads((FIXTURES / "runs.json").read_text())
+    runs[0]["branch"] = "agent/[/]x"
+    runs[0]["model"] = "[dim]sonnet"
+    runs_file = tmp_path / "runs.json"
+    runs_file.write_text(json.dumps(runs))
+    monkeypatch.setenv("FAKE_AGENTBOX_RUNS_FILE", str(runs_file))
+    app = build_app([])
+    async with app.run_test() as pilot:
+        await wait_for_table(app)
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, RunsScreen)
+        runs_table = app.screen.query_one("#runs", DataTable)
+        await wait_for(lambda: runs_table.row_count == 5)
+        await pilot.pause()
+        assert str(runs_table.get_row_at(0)[4]) == "agent/[/]x"
+        assert str(runs_table.get_row_at(0)[3]) == "[dim]sonnet"
+        title = app.screen.query_one("#runs-title", Label)
+        assert title.render_line(0).text.startswith("runs for zeta[/]tests")
+        assert app.is_running
+
+
+async def test_a_failed_stop_toasts_and_a_poll_notice_cannot_erase_it(
+    fake_log: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The header is one line, and the next poll's notice takes it within an interval.
+
+    So a stop that failed also raises a toast — with the runid rendered as text, not markup.
+    """
+    monkeypatch.setenv("FAKE_AGENTBOX_FAIL_STOP", "1")
+    status = fixture_status()
+    named(status, "zeta-tests")["run"]["id"] = "20260905-101500[/]"
+    point_at(monkeypatch, tmp_path, status)
+    app = build_app([])
+    # notifications=True: run_test disables them by default, so the toast is checked as it is
+    # drawn — which is also the check that `markup=False` reaches it, `[/]` and all.
+    async with app.run_test(notifications=True) as pilot:
+        await wait_for_table(app)
+        await pilot.pause()
+        await pilot.press("s")
+        await pilot.pause()
+        await pilot.press("y")
+        await wait_for(lambda: app.error_source == "stop")
+        await pilot.pause()
+        toasts = toast_texts(app)
+        assert any("stop-run failed" in t and "20260905-101500[/]" in t for t in toasts), toasts
+        # Now a poll notice takes the header line: the failure is still on the screen.
+        named(status, "mid-api")["toolchain"] = {"state": "findings", "missing": 1, "off_pin": 0}
+        point_at(monkeypatch, tmp_path, status, "second.json")
+        await pilot.press("r")
+        await wait_for(lambda: app.error_source == "toolchain")
+        await pilot.pause()
+        assert app.error == "toolchain mid-api: 1 missing"  # the one line is gone to the notice
+        still = toast_texts(app)
+        assert any("stop-run failed" in t for t in still), still
+        assert app.is_running
+
+
+async def test_an_infinite_count_from_one_box_does_not_black_out_the_poll(
+    fake_log: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`1e999` is valid JSON and Python reads it as `inf`; int(inf) raises OverflowError.
+
+    One box's guest must not be able to stop every other box's row from updating.
+    """
+    app = build_app([])
+    async with app.run_test() as pilot:
+        await wait_for_table(app)
+        await pilot.pause()
+        status = fixture_status()
+        named(status, "mid-api")["standing"]["runs_unseen"] = "__INF__"
+        named(status, "zeta-tests")["run"]["turns"] = 99  # proof the table still updates
+        path = tmp_path / "status.json"
+        path.write_text(json.dumps(status).replace('"__INF__"', "1e999"))
+        monkeypatch.setenv("FAKE_AGENTBOX_STATUS_FILE", str(path))
+        await pilot.press("r")
+        table = app.query_one("#boxes", DataTable)
+        await wait_for(lambda: str(table.get_row_at(0)[5]) == "99")
+        await pilot.pause()
+        assert app.error is None
+        # The unreadable count is dropped, the two the host computed still render, and every
+        # other box's row moved on. Before this round the whole poll raised instead.
+        assert str(table.get_row_at(1)[9]) == "1h 2↓"

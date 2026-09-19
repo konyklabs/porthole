@@ -135,7 +135,12 @@ def channel_cell(box: Box) -> Text:
     return Text(" ".join(tokens), style=channel_style(box.pending))
 
 
-def box_row(box: Box) -> tuple[Text, Text, str, Text, str, str, str, Text, Text, Text]:
+def box_row(box: Box) -> tuple[Text, Text, Text, Text, Text, Text, Text, Text, Text, Text]:
+    """Ten cells, one per COLUMNS entry, every one of them a Text.
+
+    Never a plain ``str``: DataTable runs a string cell through ``Text.from_markup``, so a
+    ``[dim]`` in a name the CLI reported would vanish and a ``[/]`` would raise mid-render.
+    """
     dot = Text("●", style="green") if box.is_running else Text("○", style="dim")
     egress = egress_cell(box.firewall)
     run = box.run
@@ -143,11 +148,11 @@ def box_row(box: Box) -> tuple[Text, Text, str, Text, str, str, str, Text, Text,
         return (
             dot,
             egress,
-            box.name,
+            Text(box.name),
             Text(""),
-            "",
-            "",
-            "",
+            Text(""),
+            Text(""),
+            Text(""),
             last_cell(None, box.firewall_detail),
             session_cell(box),
             channel_cell(box),
@@ -155,11 +160,11 @@ def box_row(box: Box) -> tuple[Text, Text, str, Text, str, str, str, Text, Text,
     return (
         dot,
         egress,
-        box.name,
+        Text(box.name),
         run_state_cell(run.state),
-        fmt_elapsed(run.elapsed_s),
-        fmt_turns(run.turns),
-        fmt_cost(run.cost_usd),
+        Text(fmt_elapsed(run.elapsed_s)),
+        Text(fmt_turns(run.turns)),
+        Text(fmt_cost(run.cost_usd)),
         last_cell(run.last_tool, box.firewall_detail),
         session_cell(box),
         channel_cell(box),
@@ -246,7 +251,9 @@ class ConfirmScreen(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         with Vertical():
-            yield Label(self.question)
+            # Text, not the string: the question carries a runid and a box name, and Label
+            # would read a `[dim]` in either as markup and a `[/]` would raise here.
+            yield Label(Text(self.question))
             with Horizontal():
                 yield Button("yes", id="yes", variant="error")
                 yield Button("no", id="no")
@@ -321,7 +328,7 @@ class RunsScreen(ModalScreen[None]):
 
     def compose(self) -> ComposeResult:
         with Vertical():
-            yield Label(f"runs for {self.box.name}", id="runs-title")
+            yield Label(Text(f"runs for {self.box.name}"), id="runs-title")
             yield DataTable(id="runs", cursor_type="row", zebra_stripes=True)
             yield Static("loading…", id="runs-status")
 
@@ -351,20 +358,22 @@ class RunsScreen(ModalScreen[None]):
         status.update(f"{len(runs)} runs  ·  esc closes")
 
     @staticmethod
-    def _cells(run: dict[str, Any]) -> tuple[str | Text, ...]:
+    def _cells(run: dict[str, Any]) -> tuple[Text, ...]:
+        """Every cell a Text, for the reason box_row gives: a runid, a model name and a
+        branch are the box's or the agent's words, and DataTable parses a `str` cell."""
         exit_code = run.get("exit")
         duration = run.get("duration_s")
         return (
-            str(run.get("runid") or ""),
+            Text(str(run.get("runid") or "")),
             run_state_cell(str(run.get("state") or "")),
-            "" if exit_code is None else str(exit_code),
-            str(run.get("model") or ""),
-            str(run.get("branch") or ""),
-            str(run.get("started_at") or ""),
-            fmt_elapsed(duration),
-            fmt_turns(run.get("turns")),
-            fmt_cost(run.get("cost_usd")),
-            "" if run.get("files_changed") is None else str(run.get("files_changed")),
+            Text("" if exit_code is None else str(exit_code)),
+            Text(str(run.get("model") or "")),
+            Text(str(run.get("branch") or "")),
+            Text(str(run.get("started_at") or "")),
+            Text(fmt_elapsed(duration)),
+            Text(fmt_turns(run.get("turns"))),
+            Text(fmt_cost(run.get("cost_usd"))),
+            Text("" if run.get("files_changed") is None else str(run.get("files_changed"))),
         )
 
     def action_close(self) -> None:
@@ -707,7 +716,16 @@ class PortholeApp(App[None]):
         try:
             await self.backend.stop_run(box.target, runid)
         except Exception as exc:
-            self.set_error(str(exc) or exc.__class__.__name__, "stop")
+            reason = str(exc) or exc.__class__.__name__
+            self.set_error(reason, "stop")
+            # A toast as well as the header line: the header is one line that the next poll's
+            # notice takes over within an interval, and a stop that failed must not read as
+            # nothing happened. Success already toasts; this is the other half of that.
+            self.notify(
+                f"stop-run failed for {runid} on {box.name}: {reason}",
+                severity="error",
+                markup=False,
+            )
             return
         if self.error_source == "stop":
             self.clear_error()
