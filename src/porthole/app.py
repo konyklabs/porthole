@@ -20,6 +20,7 @@ from .model import (
     Box,
     Event,
     Status,
+    channel_style,
     egress_style,
     fmt_age,
     fmt_cost,
@@ -27,6 +28,7 @@ from .model import (
     fmt_ts,
     fmt_turns,
     run_state_style,
+    standing_style,
 )
 
 # The only colours in the app: one per event kind. Everything else is the theme's.
@@ -107,12 +109,49 @@ def last_cell(last_tool: str | None, firewall_detail: str | None) -> Text:
     return cell
 
 
-def box_row(box: Box) -> tuple[Text, Text, str, Text, str, str, str, Text]:
+def session_cell(box: Box) -> Text:
+    """The standing in-box session's state, or nothing when the box runs none."""
+    standing = box.standing
+    if standing is None:
+        return Text("")
+    return Text(standing.state, style=standing_style(standing.state))
+
+
+def channel_cell(box: Box) -> Text:
+    """At most three tokens, empty when nothing pends: messages up, requests down, unseen runs.
+
+    ``1h`` a handoff the host has not read · ``2↓`` a request the box has not picked up ·
+    ``+2`` finished runs the standing session has not been told about.
+    """
+    channel = box.channel
+    standing = box.standing
+    tokens = []
+    if channel is not None and channel.to_host_unread:
+        tokens.append(f"{channel.to_host_unread}h")
+    if channel is not None and channel.to_box_queued:
+        tokens.append(f"{channel.to_box_queued}↓")
+    if standing is not None and standing.runs_unseen:
+        tokens.append(f"+{standing.runs_unseen}")
+    return Text(" ".join(tokens), style=channel_style(box.pending))
+
+
+def box_row(box: Box) -> tuple[Text, Text, str, Text, str, str, str, Text, Text, Text]:
     dot = Text("●", style="green") if box.is_running else Text("○", style="dim")
     egress = egress_cell(box.firewall)
     run = box.run
     if run is None:
-        return (dot, egress, box.name, Text(""), "", "", "", last_cell(None, box.firewall_detail))
+        return (
+            dot,
+            egress,
+            box.name,
+            Text(""),
+            "",
+            "",
+            "",
+            last_cell(None, box.firewall_detail),
+            session_cell(box),
+            channel_cell(box),
+        )
     return (
         dot,
         egress,
@@ -122,6 +161,8 @@ def box_row(box: Box) -> tuple[Text, Text, str, Text, str, str, str, Text]:
         fmt_turns(run.turns),
         fmt_cost(run.cost_usd),
         last_cell(run.last_tool, box.firewall_detail),
+        session_cell(box),
+        channel_cell(box),
     )
 
 
@@ -129,6 +170,54 @@ def egress_disagreements(status: Status) -> str | None:
     """One header line naming every box whose mode file and live ruleset disagree."""
     parts = [f"{b.name}: {b.firewall_detail}" for b in status.sorted_boxes if b.egress_disagrees]
     return "egress " + "; ".join(parts) if parts else None
+
+
+def toolchain_notices(status: Status) -> str | None:
+    """Boxes whose baseline toolchain has a finding. `unknown` is not one: nobody answered."""
+    parts = [
+        f"{b.name}: {b.toolchain.summary}"
+        for b in status.sorted_boxes
+        if b.toolchain is not None and b.toolchain.has_findings
+    ]
+    return "toolchain " + "; ".join(parts) if parts else None
+
+
+def leftover_notices(status: Status) -> str | None:
+    """What earlier runs left running. No column: when nothing survived there is nothing to say."""
+    parts = [
+        f"{b.name}: {b.leftovers.summary}"
+        for b in status.sorted_boxes
+        if b.leftovers is not None and b.leftovers.total
+    ]
+    return "leftovers " + "; ".join(parts) if parts else None
+
+
+def channel_notices(status: Status) -> str | None:
+    """A queued request that is gone from the box's mailbox: the box removed it, unanswered."""
+    parts = [
+        f"{b.name}: {b.channel.lost_summary} the box removed"
+        for b in status.sorted_boxes
+        if b.channel is not None and b.channel.to_box_lost
+    ]
+    return "channel " + "; ".join(parts) if parts else None
+
+
+# One header line can show, and four things want it. Priority: what can leave the box, then
+# what invalidates the work, then what costs resources, then what was silently dropped.
+POLL_NOTICES = (
+    ("egress", egress_disagreements),
+    ("toolchain", toolchain_notices),
+    ("leftovers", leftover_notices),
+    ("channel", channel_notices),
+)
+# Every source a poll can raise, so a later clean poll clears it. A literal list here is how a
+# new source stays on the screen for ever.
+POLL_SOURCES = ("status",) + tuple(name for name, _ in POLL_NOTICES)
+
+
+def poll_notices(status: Status) -> list[tuple[str, str]]:
+    """Every notice this poll raises, in priority order."""
+    return [(name, line) for name, fn in POLL_NOTICES if (line := fn(status))]
 
 
 class ConfirmScreen(ModalScreen[bool]):
@@ -313,7 +402,18 @@ class PortholeApp(App[None]):
         Binding("q", "quit", "quit"),
     ]
 
-    COLUMNS = ("", "egress", "box", "run", "elapsed", "turns", "cost", "last tool")
+    COLUMNS = (
+        "",
+        "egress",
+        "box",
+        "run",
+        "elapsed",
+        "turns",
+        "cost",
+        "last tool",
+        "session",
+        "chan",
+    )
 
     def __init__(self, backend: Backend, interval: float = 3.0) -> None:
         super().__init__()
@@ -372,10 +472,12 @@ class PortholeApp(App[None]):
         try:
             self.render_table(status)
             self.status = status
-            disagreement = egress_disagreements(status)
-            if disagreement:
-                self.set_error(disagreement, "egress")
-            elif self.error_source in ("status", "egress"):
+            notices = poll_notices(status)
+            if notices:
+                source, line = notices[0]
+                extra = f"  (+{len(notices) - 1} more)" if len(notices) > 1 else ""
+                self.set_error(line + extra, source)
+            elif self.error_source in POLL_SOURCES:
                 self.clear_error()
             else:
                 self.render_header()
@@ -402,19 +504,30 @@ class PortholeApp(App[None]):
     def render_header(self) -> None:
         summary = self.query_one("#summary", Static)
         if self.status is None:
-            summary.update("porthole  ·  waiting for agentbox status")
+            summary.update(Text("porthole  ·  waiting for agentbox status"))
         else:
             boxes = len(self.status.boxes)
             runs = self.status.running_runs
+            waiting = self.status.waiting_runs
+            pending = self.status.pending
             follow = "follow on" if self.follow_enabled else "follow off"
+            # Both new counts are omitted when zero: a waiting run and a pending message are
+            # exceptions, and a header that always says "0 waiting" stops being read.
+            run_part = f"{runs} running run{'s' if runs != 1 else ''}"
+            if waiting:
+                run_part += f" · {waiting} waiting"
+            pending_part = f"  ·  {pending} pending" if pending else ""
             summary.update(
-                f"porthole  ·  {boxes} box{'es' if boxes != 1 else ''}  ·  "
-                f"{runs} running run{'s' if runs != 1 else ''}  ·  "
-                f"status {fmt_age(self.status.age_s())}  ·  {follow}"
+                Text(
+                    f"porthole  ·  {boxes} box{'es' if boxes != 1 else ''}  ·  {run_part}"
+                    f"{pending_part}  ·  status {fmt_age(self.status.age_s())}  ·  {follow}"
+                )
             )
         error = self.query_one("#error", Static)
         if self.error:
-            error.update(f"agentbox: {self.error}")
+            # Text, not a markup string: the line carries CLI stderr and box-authored detail,
+            # and a `[word]` in it would otherwise be parsed as markup and silently vanish.
+            error.update(Text(f"agentbox: {self.error}"))
             error.remove_class("hidden")
         else:
             error.update("")
@@ -598,7 +711,8 @@ class PortholeApp(App[None]):
             return
         if self.error_source == "stop":
             self.clear_error()
-        self.notify(f"stop-run sent for {runid} on {box.name}")
+        # markup=False for the same reason as the header: the box name and runid are not ours.
+        self.notify(f"stop-run sent for {runid} on {box.name}", markup=False)
         self.poll_tick()
 
     def action_attach(self) -> None:

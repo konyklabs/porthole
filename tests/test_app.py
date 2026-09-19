@@ -69,6 +69,8 @@ async def test_table_renders_fixture_boxes_in_order(fake_log: Path) -> None:
             "12",
             "$0.43",
             "Edit  tests/e2e/checkout.spec.ts",
+            "",  # no standing session on a box that is running a run
+            "",  # nothing pends
         ]
         omega = table.get_row_at(2)
         assert str(omega[3]) == "lost" and omega[3].style == "red"
@@ -582,6 +584,230 @@ async def test_egress_disagreement_is_a_header_error(
         monkeypatch.delenv("FAKE_AGENTBOX_STATUS_FILE")
         await pilot.press("r")
         await wait_for(lambda: app.error is None)  # a clean poll clears it
+        assert app.is_running
+
+
+def point_at(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, status: dict, name: str = "status.json"
+) -> None:
+    """Serve a mutated copy of the fixture: the idiom every new-field test below uses."""
+    path = tmp_path / name
+    path.write_text(json.dumps(status))
+    monkeypatch.setenv("FAKE_AGENTBOX_STATUS_FILE", str(path))
+
+
+def fixture_status() -> dict:
+    return json.loads((FIXTURES / "status.json").read_text())
+
+
+def named(status: dict, name: str) -> dict:
+    return next(b for b in status["boxes"] if b["name"] == name)
+
+
+def cells(app: PortholeApp, row: int) -> list[str]:
+    return [str(c) for c in app.query_one("#boxes", DataTable).get_row_at(row)]
+
+
+async def test_chan_and_session_cells_read_from_the_new_keys(fake_log: Path) -> None:
+    app = build_app([])
+    async with app.run_test() as pilot:
+        await wait_for_table(app)
+        await pilot.pause()
+        table = app.query_one("#boxes", DataTable)
+        mid = table.get_row_at(1)  # a standing session, an unread handoff, two queued requests
+        assert str(mid[2]) == "mid-api"
+        assert str(mid[8]) == "working" and mid[8].style == ""
+        assert str(mid[9]) == "1h 2↓ +2"
+        assert mid[9].style == "yellow"
+        zeta = table.get_row_at(0)  # a run, no standing session, nothing pending
+        assert str(zeta[8]) == "" and str(zeta[9]) == ""
+        assert zeta[9].style == "dim"
+        alpha = table.get_row_at(3)  # the not-running literal: nobody was asked
+        assert str(alpha[8]) == "" and str(alpha[9]) == ""
+        assert app.error is None
+        # 1 unread + 2 queued + 2 unseen runs, the same three numbers as the cell
+        assert "5 pending" in str(app.query_one("#summary", Static).content)
+
+
+async def test_session_cell_styles_a_waiting_standing_session(
+    fake_log: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    app = build_app([])
+    async with app.run_test() as pilot:
+        await wait_for_table(app)
+        await pilot.pause()
+        status = fixture_status()
+        named(status, "mid-api")["standing"]["state"] = "waiting"
+        point_at(monkeypatch, tmp_path, status)
+        await pilot.press("r")
+        table = app.query_one("#boxes", DataTable)
+        await wait_for(lambda: str(table.get_row_at(1)[8]) == "waiting")
+        await pilot.pause()
+        assert table.get_row_at(1)[8].style == "yellow"
+        assert app.error is None  # a waiting session is a cell, not a header line
+
+
+async def test_toolchain_finding_is_a_header_line_and_a_clean_poll_clears_it(
+    fake_log: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The test that fails against a literal clear list: a new source must clear too."""
+    app = build_app([])
+    async with app.run_test() as pilot:
+        await wait_for_table(app)
+        await pilot.pause()
+        assert app.error is None
+        status = fixture_status()
+        named(status, "mid-api")["toolchain"] = {
+            "state": "findings",
+            "missing": 1,
+            "off_pin": 1,
+            "checked_at": "2026-09-05T09:44:19Z",
+        }
+        point_at(monkeypatch, tmp_path, status)
+        await pilot.press("r")
+        await wait_for(lambda: app.error is not None)
+        await pilot.pause()
+        assert app.error == "toolchain mid-api: 1 missing, 1 off pin"
+        assert app.error_source == "toolchain"
+        assert not app.query_one("#error", Static).has_class("hidden")
+        monkeypatch.delenv("FAKE_AGENTBOX_STATUS_FILE")
+        await pilot.press("r")
+        await wait_for(lambda: app.error is None)
+        await pilot.pause()
+        assert app.query_one("#error", Static).has_class("hidden")
+
+
+async def test_unknown_toolchain_is_not_a_finding(
+    fake_log: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    app = build_app([])
+    async with app.run_test() as pilot:
+        await wait_for_table(app)
+        await pilot.pause()
+        status = fixture_status()
+        for name in ("zeta-tests", "mid-api"):
+            named(status, name)["toolchain"] = {"state": "unknown", "missing": 0, "off_pin": 0}
+        point_at(monkeypatch, tmp_path, status)
+        await pilot.press("r")
+        await asyncio.sleep(0.3)
+        await pilot.pause()
+        assert app.error is None  # nobody could read the snapshot: that is not a finding
+
+
+async def test_two_notices_show_the_higher_one_and_count_the_rest(
+    fake_log: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    app = build_app([])
+    async with app.run_test() as pilot:
+        await wait_for_table(app)
+        await pilot.pause()
+        status = fixture_status()
+        named(status, "mid-api")["toolchain"] = {"state": "findings", "missing": 1, "off_pin": 0}
+        named(status, "omega-web")["leftovers"] = {
+            "procs": 2,
+            "ports": ["tcp:5173"],
+            "worktrees": [],
+            "tmux": ["devserver"],
+            "runs": ["20260905-081200"],
+            "truncated": False,
+        }
+        named(status, "omega-web")["channel"]["to_box_lost"] = 1
+        point_at(monkeypatch, tmp_path, status)
+        await pilot.press("r")
+        await wait_for(lambda: app.error is not None)
+        await pilot.pause()
+        assert app.error == "toolchain mid-api: 1 missing  (+2 more)"
+        assert app.error_source == "toolchain"
+        # Drop the toolchain finding: the next-priority notice takes the line, and the source
+        # it is cleared against changes with it.
+        del named(status, "mid-api")["toolchain"]["state"]
+        point_at(monkeypatch, tmp_path, status, "second.json")
+        await pilot.press("r")
+        await wait_for(lambda: app.error_source == "leftovers")
+        await pilot.pause()
+        assert app.error == (
+            "leftovers omega-web: 2 processes, 1 port, 1 tmux session  (+1 more)"
+        )
+        named(status, "omega-web")["leftovers"]["procs"] = 0
+        named(status, "omega-web")["leftovers"]["ports"] = []
+        named(status, "omega-web")["leftovers"]["tmux"] = []
+        point_at(monkeypatch, tmp_path, status, "third.json")
+        await pilot.press("r")
+        await wait_for(lambda: app.error_source == "channel")
+        assert app.error == "channel omega-web: 1 queued request the box removed"
+
+
+async def test_waiting_run_sorts_above_an_idle_box_and_is_counted_apart(
+    fake_log: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    app = build_app([])
+    async with app.run_test() as pilot:
+        await wait_for_table(app)
+        await pilot.pause()
+        status = fixture_status()
+        named(status, "omega-web")["run"]["state"] = "waiting"
+        point_at(monkeypatch, tmp_path, status)
+        await pilot.press("r")
+        waiting_first = ["zeta-tests", "omega-web", "mid-api", "alpha-docs"]
+        await wait_for(lambda: table_names(app) == waiting_first)
+        await pilot.pause()
+        summary = str(app.query_one("#summary", Static).content)
+        assert "1 running run · 1 waiting" in summary
+        assert app.status is not None and app.status.running_runs == 1
+        assert app.status.waiting_runs == 1
+
+
+async def test_a_channel_that_is_not_an_object_renders_an_empty_cell(
+    fake_log: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    app = build_app([])
+    async with app.run_test() as pilot:
+        await wait_for_table(app)
+        await pilot.pause()
+        status = fixture_status()
+        named(status, "mid-api")["channel"] = "nope"
+        named(status, "mid-api")["standing"] = "nope"
+        named(status, "mid-api")["leftovers"] = "nope"
+        named(status, "mid-api")["toolchain"] = "nope"
+        point_at(monkeypatch, tmp_path, status)
+        await pilot.press("r")
+        table = app.query_one("#boxes", DataTable)
+        await wait_for(lambda: str(table.get_row_at(1)[9]) == "")
+        await pilot.pause()
+        assert table.row_count == 4  # the whole poll survives a mis-shaped key
+        assert str(table.get_row_at(1)[8]) == ""
+        assert app.error is None
+        assert table_names(app) == EXPECTED_ORDER
+
+
+async def test_a_detail_with_brackets_reaches_the_header_intact(
+    fake_log: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A bracketed word is markup to Static: `[dim]` would vanish and `[/]` would raise.
+
+    Both come from the CLI or from inside a box, so the header renders Text, never a
+    markup string. Checked against the renderer, not only against ``app.error``.
+    """
+    app = build_app([])
+    async with app.run_test() as pilot:
+        await wait_for_table(app)
+        await pilot.pause()
+        status = fixture_status()
+        named(status, "zeta-tests")["firewall_detail"] = "ACCEPT rule [dim]held by pid 421"
+        point_at(monkeypatch, tmp_path, status)
+        await pilot.press("r")
+        await wait_for(lambda: app.error is not None)
+        await pilot.pause()
+        error = app.query_one("#error", Static)
+        assert app.error == "egress zeta-tests: ACCEPT rule [dim]held by pid 421"
+        # The rendered line, not the string handed to update(): markup would have eaten the tag.
+        assert "[dim]held by pid 421" in error.render_line(0).text
+        named(status, "zeta-tests")["firewall_detail"] = "ACCEPT rule [/] held by pid 421"
+        point_at(monkeypatch, tmp_path, status, "closer.json")
+        await pilot.press("r")
+        await wait_for(lambda: "[/]" in str(app.error or ""))
+        await pilot.pause()
+        assert "[/] held by pid 421" in str(error.content)  # markup would have raised here
         assert app.is_running
 
 
