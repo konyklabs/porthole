@@ -3,7 +3,7 @@
 A terminal window into every agent box.
 
 porthole is a small Textual app for the host machine that lists every
-[agent-box](https://github.com/OlegKonyk/agent-box) you have, shows the run
+[agent-box](https://github.com/konyklabs/agent-box) you have, shows the run
 each one is on, streams that run's event log, and lets you stop a run or
 attach a terminal, all from one screen.
 
@@ -39,7 +39,7 @@ uv run porthole
 As a tool, straight from git:
 
 ```
-uv tool install git+https://github.com/OlegKonyk/porthole
+uv tool install git+https://github.com/konyklabs/porthole
 porthole
 ```
 
