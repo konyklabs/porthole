@@ -26,8 +26,9 @@ from porthole.model import (
     egress_style,
     fmt_age,
     fmt_cost,
+    fmt_count,
     fmt_elapsed,
-    fmt_turns,
+    fmt_exit,
     parse_iso,
     run_state_style,
     standing_style,
@@ -236,9 +237,9 @@ def test_count_coercion() -> None:
     assert _count(10**4000) == 99999  # a count is clamped, never a 4001-character cell
 
 
-def a_run(**numbers: Any) -> Run:
-    """A run whose four numbers are whatever the test hands it, id and state aside."""
-    return Run.from_json({"id": "R", "state": "done", **numbers})
+def a_run(**fields: Any) -> Run:
+    """A run whose fields are whatever the test hands it, id and state aside."""
+    return Run.from_json({"id": "R", "state": "done", **fields})
 
 
 def test_run_numbers_go_through_the_same_clamp_as_the_counts() -> None:
@@ -254,7 +255,7 @@ def test_run_numbers_go_through_the_same_clamp_as_the_counts() -> None:
         run = a_run(exit=junk, elapsed_s=junk, turns=junk, cost_usd=junk)
         assert (run.exit, run.elapsed_s, run.turns, run.cost_usd) == (None, None, None, None), junk
         # No number to show is an empty cell, never a fabricated zero.
-        cells = (fmt_elapsed(run.elapsed_s), fmt_turns(run.turns), fmt_cost(run.cost_usd))
+        cells = (fmt_elapsed(run.elapsed_s), fmt_count(run.turns), fmt_cost(run.cost_usd))
         assert cells == ("", "", ""), junk
     huge = a_run(exit=10**4000, elapsed_s=10**4000, turns=10**4000, cost_usd=10**4000)
     assert (huge.elapsed_s, huge.turns, huge.cost_usd, huge.exit) == (
@@ -270,13 +271,53 @@ def test_run_numbers_go_through_the_same_clamp_as_the_counts() -> None:
     assert (negative.elapsed_s, negative.turns, negative.cost_usd) == (0.0, 0, 0.0)
 
 
+def test_run_strings_are_strings_whatever_the_cli_sent() -> None:
+    """The other half of the same door: a mis-shaped *string* raises in the row builder.
+
+    `Text()` calls `str.translate` on what it is given, so `Text({})` raises AttributeError
+    inside `box_row`, which is the render of every box's row — the same blackout as a number
+    that cannot be coerced. `Standing.last_tool`, the identically named sibling field, went
+    through `_optional_str` already; `Run.last_tool` is the one that reaches the row builder.
+    """
+    kept = a_run(model="sonnet", branch="agent/x", last_tool="Bash  ls", last_text="done")
+    assert (kept.model, kept.branch, kept.last_tool, kept.last_text) == (
+        "sonnet",
+        "agent/x",
+        "Bash  ls",
+        "done",
+    )
+    for junk in ({"$": 1}, ["ls"], 7, True, 0.5, object()):
+        run = a_run(model=junk, branch=junk, started_at=junk, last_tool=junk, last_text=junk)
+        for field in (run.model, run.branch, run.started_at, run.last_tool, run.last_text):
+            assert isinstance(field, str), (junk, field)
+    for empty in (None, "", "   "):
+        run = a_run(model=empty, branch=empty, last_tool=empty, last_text=empty)
+        assert (run.model, run.branch, run.last_tool, run.last_text) == (None, None, None, None)
+
+
 def test_the_formatters_take_whatever_the_cli_sent() -> None:
     """The runs modal formats raw JSON values, so the clamp lives in the formatter too."""
     assert fmt_elapsed("427") == "07:07" and fmt_elapsed("nope") == ""
     assert fmt_elapsed(float("inf")) == "" and fmt_elapsed([]) == ""
-    assert fmt_turns("12") == "12" and fmt_turns({}) == "" and fmt_turns(float("nan")) == ""
+    assert fmt_count("12") == "12" and fmt_count({}) == "" and fmt_count(float("nan")) == ""
     assert fmt_cost("0.4312") == "$0.43" and fmt_cost(["0.43"]) == ""
     assert fmt_age("600") == "10m ago" and fmt_age("nope") == "?" and fmt_age(float("inf")) == "?"
+
+
+def test_every_numeric_cell_of_the_runs_modal_is_bounded_in_width() -> None:
+    """`exit` and `files_changed` took `str()` raw: two of the modal's ten columns unbounded.
+
+    A column that renders 4003 cells wide inside an 80-cell viewport pushes the columns after
+    it off the screen for every run in the list, not only the mis-shaped one. `fmt_exit` is
+    `fmt_count` with the sign kept, because `0` is the one exit status that means success.
+    """
+    assert (fmt_exit(0), fmt_exit(1), fmt_exit(-9)) == ("0", "1", "-9")
+    assert fmt_exit(10**4000) == "99999" and fmt_exit(-(10**4000)) == "-99999"
+    assert fmt_count(10**4000) == "99999"
+    for junk in ("nope", "", [], {}, ["1"], None, float("inf"), float("nan")):
+        assert (fmt_exit(junk), fmt_count(junk)) == ("", ""), junk
+    widest = max(len(f(10**4000)) for f in (fmt_exit, fmt_count, fmt_elapsed, fmt_cost))
+    assert widest <= 9, widest  # the widest a number cell can be: `$99999.99`
 
 
 def test_a_hostile_session_age_is_a_number_or_nothing() -> None:

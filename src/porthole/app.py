@@ -24,9 +24,10 @@ from .model import (
     egress_style,
     fmt_age,
     fmt_cost,
+    fmt_count,
     fmt_elapsed,
+    fmt_exit,
     fmt_ts,
-    fmt_turns,
     run_state_style,
     standing_style,
 )
@@ -163,7 +164,7 @@ def box_row(box: Box) -> tuple[Text, Text, Text, Text, Text, Text, Text, Text, T
         Text(box.name),
         run_state_cell(run.state),
         Text(fmt_elapsed(run.elapsed_s)),
-        Text(fmt_turns(run.turns)),
+        Text(fmt_count(run.turns)),
         Text(fmt_cost(run.cost_usd)),
         last_cell(run.last_tool, box.firewall_detail),
         session_cell(box),
@@ -360,20 +361,23 @@ class RunsScreen(ModalScreen[None]):
     @staticmethod
     def _cells(run: dict[str, Any]) -> tuple[Text, ...]:
         """Every cell a Text, for the reason box_row gives: a runid, a model name and a
-        branch are the box's or the agent's words, and DataTable parses a `str` cell."""
-        exit_code = run.get("exit")
-        duration = run.get("duration_s")
+        branch are the box's or the agent's words, and DataTable parses a `str` cell.
+
+        Every number goes through the model's formatters, including the two that used to take
+        `str()` raw: a 4001-digit `exit` sized its column to 4003 cells inside an 80-cell
+        viewport, which pushes the columns after it off the screen for every run in the list.
+        """
         return (
             Text(str(run.get("runid") or "")),
             run_state_cell(str(run.get("state") or "")),
-            Text("" if exit_code is None else str(exit_code)),
+            Text(fmt_exit(run.get("exit"))),
             Text(str(run.get("model") or "")),
             Text(str(run.get("branch") or "")),
             Text(str(run.get("started_at") or "")),
-            Text(fmt_elapsed(duration)),
-            Text(fmt_turns(run.get("turns"))),
+            Text(fmt_elapsed(run.get("duration_s"))),
+            Text(fmt_count(run.get("turns"))),
             Text(fmt_cost(run.get("cost_usd"))),
-            Text("" if run.get("files_changed") is None else str(run.get("files_changed"))),
+            Text(fmt_count(run.get("files_changed"))),
         )
 
     def action_close(self) -> None:

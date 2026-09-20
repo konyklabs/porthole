@@ -54,25 +54,27 @@ class Run:
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> Run:
-        """Every number clamped by the same helper the counts use, for the same reason.
+        """Every field coerced: the numbers clamped, the strings made strings.
 
-        A run's numbers come from the guest, so a string, a list or `1e999` can arrive in any
-        of them. Coercing here rather than in the formatter is what keeps one mis-shaped run
-        from stopping every other box's row from updating: `int("0.43")` raises, and the raise
-        lands in the render of the whole table.
+        A run's fields come from the guest, so a string, a list or `1e999` can arrive in any
+        of them. Coercing here rather than in the renderer is what keeps one mis-shaped run
+        from stopping every other box's row from updating: `int("0.43")` raises, and so does
+        `Text({})` — `rich` calls `str.translate` on what it is given — and both raises land in
+        the render of the whole table. The strings go through the same helper their namesakes on
+        `Standing` already used.
         """
         return cls(
             id=str(data.get("id", "")),
             state=str(data.get("state", "")),
             exit=_whole(data.get("exit"), EXIT_MAX, -EXIT_MAX),
-            model=data.get("model"),
-            branch=data.get("branch"),
-            started_at=data.get("started_at"),
+            model=_optional_str(data.get("model")),
+            branch=_optional_str(data.get("branch")),
+            started_at=_optional_str(data.get("started_at")),
             elapsed_s=_clamped(data.get("elapsed_s"), 0, SECONDS_MAX),
             turns=_whole(data.get("turns")),
             cost_usd=_clamped(data.get("cost_usd"), 0, COST_MAX),
-            last_tool=data.get("last_tool"),
-            last_text=data.get("last_text"),
+            last_tool=_optional_str(data.get("last_tool")),
+            last_text=_optional_str(data.get("last_text")),
         )
 
 
@@ -534,9 +536,22 @@ def fmt_cost(cost: Any) -> str:
     return "" if amount is None else f"${amount:.2f}"
 
 
-def fmt_turns(turns: Any) -> str:
-    count = _whole(turns)
+def fmt_count(value: Any) -> str:
+    """A whole count as a cell shows it: the turns of a run, the files a run changed.
+
+    Was `fmt_turns`; it is one shape, and the runs modal has two columns of it.
+    """
+    count = _whole(value)
     return "" if count is None else str(count)
+
+
+def fmt_exit(code: Any) -> str:
+    """An exit status: bounded in width like every other number, never pulled towards zero.
+
+    `0` is the one value that means the run succeeded, so a signal's `-9` keeps its sign.
+    """
+    number = _whole(code, EXIT_MAX, -EXIT_MAX)
+    return "" if number is None else str(number)
 
 
 def egress_mode(value: Any) -> str:

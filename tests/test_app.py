@@ -993,16 +993,69 @@ async def test_a_mis_shaped_run_number_does_not_black_out_the_poll(
         assert (zeta.run.elapsed_s, zeta.run.turns, zeta.run.exit) == (None, None, None)
 
 
+async def test_a_mis_shaped_run_string_does_not_black_out_the_poll(
+    fake_log: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The same door, its other half: `Text()` raises on anything that is not a string.
+
+    `rich` calls `str.translate` on what `Text()` is given, so `Text({})` raises AttributeError
+    inside `box_row` — the render of every box's row, exactly where a mis-shaped number raised.
+    `last_tool` is the field that reaches the row builder, and the guest builds it from a tool
+    block's `name`, which porthole is not entitled to assume is a string.
+    """
+    app = build_app([])
+    async with app.run_test() as pilot:
+        await wait_for_table(app)
+        await pilot.pause()
+        status = fixture_status()
+        run = named(status, "zeta-tests")["run"]
+        run["last_tool"] = {"name": "Bash"}  # an object where the contract says string
+        run["last_text"] = ["done"]
+        run["model"] = 7
+        named(status, "omega-web")["run"]["state"] = "failed"  # proof the table still updates
+        path = tmp_path / "status.json"
+        path.write_text(json.dumps(status))
+        monkeypatch.setenv("FAKE_AGENTBOX_STATUS_FILE", str(path))
+        await pilot.press("r")
+        table = app.query_one("#boxes", DataTable)
+        await wait_for(lambda: str(table.get_row_at(2)[3]) == "failed")
+        await pilot.pause()
+        assert app.error is None
+        assert table_names(app) == EXPECTED_ORDER
+        # The cell shows what the box sent, spelled out: a bug report, not a blank and not a raise.
+        assert cells(app, 0)[7] == "{'name': 'Bash'}"
+        assert app.status is not None
+        zeta = next(b for b in app.status.boxes if b.name == "zeta-tests")
+        assert zeta.run is not None and isinstance(zeta.run.model, str)
+
+
 async def test_the_runs_modal_formats_mis_shaped_numbers_without_raising(
     fake_log: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The modal formats raw `runs --json` dicts, so it needs the same clamp, not a Run."""
+    """The modal formats raw `runs --json` dicts, so it needs the same clamp, not a Run.
+
+    All five numeric columns, because `exit` and `files_changed` kept a raw `str()` after the
+    first pass: they never raised, but a 4001-digit one sized its column to 4003 cells inside an
+    80-cell viewport and pushed every column after it off the screen, for every run in the list.
+    """
     runs = json.loads((FIXTURES / "runs.json").read_text())
-    runs[0].update({"duration_s": "nope", "turns": "12", "cost_usd": ["0.43"]})
+    runs[0].update(
+        {
+            "duration_s": "nope",
+            "turns": "12",
+            "cost_usd": ["0.43"],
+            "exit": ["boom"],
+            "files_changed": {},
+        }
+    )
+    huge = 10**4000
+    runs[1].update(
+        {"exit": huge, "files_changed": huge, "duration_s": huge, "turns": huge, "cost_usd": huge}
+    )
     (tmp_path / "runs.json").write_text(json.dumps(runs))
     monkeypatch.setenv("FAKE_AGENTBOX_RUNS_FILE", str(tmp_path / "runs.json"))
     app = build_app([])
-    async with app.run_test() as pilot:
+    async with app.run_test(size=(80, 24)) as pilot:
         await wait_for_table(app)
         await pilot.pause()
         await pilot.press("enter")
@@ -1010,7 +1063,20 @@ async def test_the_runs_modal_formats_mis_shaped_numbers_without_raising(
         assert isinstance(app.screen, RunsScreen)
         table = app.screen.query_one("#runs", DataTable)
         await wait_for(lambda: table.row_count == 5)
+        await pilot.pause()
         row = [str(c) for c in table.get_row_at(0)]
-        assert row[6:9] == ["", "12", ""]  # duration, turns, cost
+        assert row[2] == "" and row[6:9] == ["", "12", ""] and row[9] == ""
+        clamped = [str(c) for c in table.get_row_at(1)]
+        assert (clamped[2], clamped[6], clamped[7], clamped[8], clamped[9]) == (
+            "99999",
+            "99999:59",
+            "99999",
+            "$99999.99",
+            "99999",
+        )
+        # The width the modal actually renders, not the width of the string: a column sized to
+        # a 4001-digit number is the failure, and no number column may pass the widest cell.
+        widths = [c.get_render_width(table) for c in table.columns.values()]
+        assert max(widths[2], *widths[6:10]) <= 11, widths
         assert app.error is None
         await pilot.press("escape")
