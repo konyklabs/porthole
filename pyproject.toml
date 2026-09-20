@@ -1,6 +1,6 @@
 [project]
 name = "porthole"
-version = "0.1.0"
+version = "0.2.0"
 description = "A terminal window into every agent box: a Textual renderer of agentbox --json output"
 readme = "README.md"
 license = "MIT"

@@ -9,8 +9,12 @@
       "claude_version": null,
       "firewall": "unknown",
       "run": null,
-      "runs_total": 4,
-      "sessions": [],
+      "runs_total": null,
+      "sessions": null,
+      "standing": null,
+      "leftovers": null,
+      "toolchain": null,
+      "channel": null,
       "firewall_detail": "box is stopped; no live ruleset to read"
     },
     {
@@ -37,9 +41,42 @@
       "sessions": [
         {
           "name": "run-20260905-101500",
-          "age_s": 427
+          "kind": "run",
+          "runid": "20260905-101500",
+          "state": "running",
+          "age_s": 427,
+          "last_event": {
+            "ts": "2026-09-05T10:22:02Z",
+            "event": "PostToolUse"
+          },
+          "produced": {
+            "branch": "agent/cover-checkout-20260905-101500"
+          }
         }
-      ]
+      ],
+      "standing": null,
+      "leftovers": {
+        "procs": 0,
+        "ports": [],
+        "worktrees": [],
+        "tmux": [],
+        "runs": [],
+        "truncated": false
+      },
+      "toolchain": {
+        "state": "ok",
+        "missing": 0,
+        "off_pin": 0,
+        "checked_at": "2026-09-05T09:58:02Z"
+      },
+      "channel": {
+        "to_host_unread": 0,
+        "to_host_open": 0,
+        "to_host_newest": null,
+        "to_box_queued": 0,
+        "to_box_open": 0,
+        "to_box_lost": 0
+      }
     },
     {
       "name": "mid-api",
@@ -53,9 +90,48 @@
       "sessions": [
         {
           "name": "claude",
-          "age_s": 1860
+          "kind": "session",
+          "runid": null,
+          "state": "running",
+          "age_s": 1860,
+          "last_event": {
+            "ts": "2026-09-05T10:21:02Z",
+            "event": "Stop"
+          },
+          "produced": null
         }
-      ]
+      ],
+      "standing": {
+        "name": "claude",
+        "state": "working",
+        "since": "2026-09-05T09:51:07Z",
+        "task": "porting the checkout tests",
+        "last_tool": "Bash",
+        "last_text": "Running the suite once more.",
+        "runs_unseen": 2
+      },
+      "leftovers": {
+        "procs": 0,
+        "ports": [],
+        "worktrees": [],
+        "tmux": [],
+        "runs": [],
+        "truncated": false
+      },
+      "toolchain": {
+        "state": "ok",
+        "missing": 0,
+        "off_pin": 0,
+        "checked_at": "2026-09-05T09:44:19Z"
+      },
+      "channel": {
+        "to_host_unread": 1,
+        "to_host_open": 2,
+        "to_host_newest": "2026-09-05T10:19:40Z",
+        "to_box_queued": 2,
+        "to_box_open": 1,
+        "to_box_lost": 0
+      }
     },
     {
       "name": "omega-web",
@@ -78,7 +154,30 @@
         "last_text": null
       },
       "runs_total": 1,
-      "sessions": []
+      "sessions": [],
+      "standing": null,
+      "leftovers": {
+        "procs": 0,
+        "ports": [],
+        "worktrees": [],
+        "tmux": [],
+        "runs": [],
+        "truncated": false
+      },
+      "toolchain": {
+        "state": "unknown",
+        "missing": 0,
+        "off_pin": 0,
+        "checked_at": null
+      },
+      "channel": {
+        "to_host_unread": 0,
+        "to_host_open": 0,
+        "to_host_newest": null,
+        "to_box_queued": 0,
+        "to_box_open": 0,
+        "to_box_lost": 0
+      }
     }
   ]
 }

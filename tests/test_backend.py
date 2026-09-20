@@ -147,8 +147,11 @@ async def test_fixture_backend_is_keyed_by_target() -> None:
     assert len(await backend.runs("/home/me/dev/zeta-tests")) == 5
     assert await backend.runs("/home/me/dev/mid-api") == []
     assert await backend.runs("unknown-box") == []
-    assert len(await backend.runs("alpha-docs")) == 5  # stopped, but runs_total 4: by name too
-    assert len(await backend.runs("/home/me/dev/omega-web")) == 5  # lost newest run: has runs
+    assert len(await backend.runs("omega-web")) == 5  # lost newest run, looked up by name
+    assert len(await backend.runs("/home/me/dev/omega-web")) == 5  # and by repo path
+    # alpha-docs carries the not-running literal: `runs_total` is null, so nobody could say how
+    # many runs it has and fixture mode offers none.
+    assert await backend.runs("alpha-docs") == []
     zeta = [e async for e in backend.follow("/home/me/dev/zeta-tests", None)]
     assert len(zeta) == 12
     assert [e async for e in backend.follow("/home/me/dev/mid-api", None)] == []

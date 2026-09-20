@@ -19,6 +19,11 @@ Concretely, the five CLI calls it makes are `status --json`, `runs --json --
 <repo>`, `logs -f --json -- <repo> [runid]`, `stop-run -- <repo> [runid]` and
 `attach -- <repo> [session]`. Nothing is written to disk. No telemetry.
 
+Five is still five. The standing session, channel, toolchain and leftovers
+columns and notices all come out of `status --json`, which already carried them
+— reading and answering a box's messages, and the fleet triage view, are
+deliberately not here yet, because each is a sixth call and its own design.
+
 Two things about that promise. Textual's command palette is turned off in
 porthole, because its Screenshot command would write an SVG of the screen to
 disk; there is no key that saves anything. And the promise describes
@@ -60,21 +65,47 @@ porthole [--agentbox PATH] [--interval SECS] [--fixtures DIR]
 
 ## The window
 
-Left, a table of boxes: a state dot, the box's egress mode, the name, the
-current run's state, elapsed time, turns, cost and last tool line. The egress
-mode is what the CLI reports as the box's outbound network policy: `deny`
-(dimmed; the normal state), `observe` (yellow), `open` (red) or `unknown`
-(dimmed). `unknown` means the CLI could not establish the live mode: the box
-is stopped, the firewall unit is not active, or the mode file and the live
-ruleset disagree. When the CLI says why (its optional `firewall_detail`), the
-reason is appended dimmed at the end of that box's row, and a disagreement
-between the file and the ruleset is also raised as the header error line,
-since that is the one case worth acting on. Running runs sort first, then
-running boxes, then stopped ones. A run's state is one of `running`, `done`,
+Left, a table of boxes, ten columns: a state dot, the box's egress mode, the
+name, the current run's state, elapsed time, turns, cost, the last tool line,
+the standing session's state and what is pending in the box's channel. The
+egress mode is what the CLI reports as the box's outbound network policy:
+`deny` (dimmed; the normal state), `observe` (yellow), `open` (red) or
+`unknown` (dimmed). `unknown` means the CLI could not establish the live mode:
+the box is stopped, the firewall unit is not active, or the mode file and the
+live ruleset disagree. When the CLI says why (its optional `firewall_detail`),
+the reason is appended dimmed at the end of that box's row. Running runs sort
+first, then boxes whose newest run is waiting for an answer, then running
+boxes, then stopped ones. A run's state is one of `running`, `done`,
 `failed`, `stopped`, `lost` (its process vanished without recording an exit)
 or `unknown` (no status file); only `running` counts as running, `failed` and
-`lost` share a colour, `unknown` is dimmed. The header shows how many boxes and running
-runs there are and how old the status is.
+`lost` share a colour, `unknown` is dimmed.
+
+The last two columns are the box's other loop, the standing interactive session
+inside it:
+
+| Column | Shows |
+|---|---|
+| `session` | the standing session's state — `working`, `idle`, `waiting` or `gone` — and nothing at all when the box has never run one |
+| `chan` | at most three tokens, and empty when nothing pends: `1h` a handoff the host has not read, `2↓` a request the box has not picked up, `+2` finished runs the session has not been told about |
+
+The header shows how many boxes and running runs there are, how many runs are
+waiting for an answer, how many messages are pending across the fleet, and how
+old the status is. The two new counts are omitted when they are zero: a header
+that always says `0 waiting` stops being read.
+
+One header line is also where four kinds of notice go, in priority order — what
+can leave the box first, then what invalidates the work, then what costs
+resources, then what was silently dropped:
+
+| Notice | Raised when |
+|---|---|
+| `egress` | a box's recorded mode and its live ruleset disagree |
+| `toolchain` | a box's baseline toolchain has a finding. `unknown` is not one: nobody answered |
+| `leftovers` | an earlier run in some box left a process, port, worktree or tmux session running |
+| `channel` | a request the host queued is gone from the box's mailbox — the box removed it, unanswered |
+
+The line shows the first of those and says how many it is not showing. Every one
+of them is cleared by the next clean poll, including the new ones.
 
 Right, the event log of the selected box's current or newest run, fed by
 `logs -f --json`, one line per event, coloured by kind. It follows the tail
@@ -109,8 +140,14 @@ uv run porthole --fixtures tests/fixtures
 
 That replays four fixture boxes: one running a run, one running with no run,
 one whose newest run is `lost`, one stopped, and one in each egress mode.
-Runs and logs are answered per box the way the CLI would: the box with no
-runs has an empty runs list and nothing to follow. `a` is unavailable
+Each also carries the four newer status keys on one axis: a box with a working
+standing session and things pending in both directions, a box whose toolchain
+answer is `unknown` (nobody answered — not a finding), a stopped box whose guest
+keys are all `null`, and an all-clear one. Runs and logs are answered per box the
+way the CLI would: the box with no runs has an empty runs list and nothing to
+follow. The committed fixture raises **no** header notice, deliberately, so that
+"a clean poll clears the header" stays testable; the loud cases and the priority
+order run off mutated copies in the tests. `a` is unavailable
 in fixture mode, since there is no terminal to attach to; porthole says so in
 the header. `tests/fake-agentbox` is a stand-in CLI that answers from the same
 fixtures; `AGENTBOX=tests/fake-agentbox uv run porthole` drives the real
