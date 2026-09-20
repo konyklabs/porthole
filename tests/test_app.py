@@ -405,16 +405,6 @@ async def test_bad_status_render_keeps_last_table(
     async with app.run_test() as pilot:
         await wait_for_table(app)
         await pilot.pause()
-        bad = json.loads((FIXTURES / "status.json").read_text())
-        bad["boxes"][1]["run"]["cost_usd"] = "0.43"  # a string where the contract says float
-        (tmp_path / "bad.json").write_text(json.dumps(bad))
-        monkeypatch.setenv("FAKE_AGENTBOX_STATUS_FILE", str(tmp_path / "bad.json"))
-        await pilot.press("r")
-        await wait_for(lambda: app.error is not None)
-        await pilot.pause()
-        assert app.error.startswith("status render failed:")
-        assert table_names(app) == EXPECTED_ORDER
-        assert app.status is not None and app.status.running_runs == 1
         dup = json.loads((FIXTURES / "status.json").read_text())
         dup["boxes"][0]["name"] = "zeta-tests"
         (tmp_path / "dup.json").write_text(json.dumps(dup))
@@ -963,3 +953,64 @@ async def test_an_infinite_count_from_one_box_does_not_black_out_the_poll(
         # The unreadable count is dropped, the two the host computed still render, and every
         # other box's row moved on. Before this round the whole poll raised instead.
         assert str(table.get_row_at(1)[9]) == "1h 2↓"
+
+
+async def test_a_mis_shaped_run_number_does_not_black_out_the_poll(
+    fake_log: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The second door, the same shape as the first: a run's numbers are the guest's too.
+
+    `int("nope")` raises ValueError and `f"{'0.43':.2f}"` raises TypeError, both inside
+    `render_table`, so until the clamp reached `Run` one box's mis-shaped run stopped every
+    box's row from updating. This test replaces the half of
+    `test_bad_status_render_keeps_last_table` that asserted the old, blacked-out behaviour.
+    """
+    app = build_app([])
+    async with app.run_test() as pilot:
+        await wait_for_table(app)
+        await pilot.pause()
+        status = fixture_status()
+        run = named(status, "zeta-tests")["run"]
+        run["cost_usd"] = "0.43"  # a string where the contract says float
+        run["elapsed_s"] = "nope"  # not a number at all
+        run["turns"] = "__INF__"  # 1e999, which int() cannot take
+        run["exit"] = ["boom"]  # a list where the contract says int
+        named(status, "omega-web")["run"]["state"] = "failed"  # proof the table still updates
+        path = tmp_path / "status.json"
+        path.write_text(json.dumps(status).replace('"__INF__"', "1e999"))
+        monkeypatch.setenv("FAKE_AGENTBOX_STATUS_FILE", str(path))
+        await pilot.press("r")
+        table = app.query_one("#boxes", DataTable)
+        await wait_for(lambda: str(table.get_row_at(2)[3]) == "failed")
+        await pilot.pause()
+        assert app.error is None
+        assert table_names(app) == EXPECTED_ORDER
+        # elapsed and turns have no number to show; the cost is read as the number it spells.
+        assert cells(app, 0)[4:7] == ["", "", "$0.43"]
+        assert app.status is not None and app.status.running_runs == 1
+        zeta = next(b for b in app.status.boxes if b.name == "zeta-tests")
+        assert zeta.run is not None and zeta.run.cost_usd == 0.43
+        assert (zeta.run.elapsed_s, zeta.run.turns, zeta.run.exit) == (None, None, None)
+
+
+async def test_the_runs_modal_formats_mis_shaped_numbers_without_raising(
+    fake_log: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The modal formats raw `runs --json` dicts, so it needs the same clamp, not a Run."""
+    runs = json.loads((FIXTURES / "runs.json").read_text())
+    runs[0].update({"duration_s": "nope", "turns": "12", "cost_usd": ["0.43"]})
+    (tmp_path / "runs.json").write_text(json.dumps(runs))
+    monkeypatch.setenv("FAKE_AGENTBOX_RUNS_FILE", str(tmp_path / "runs.json"))
+    app = build_app([])
+    async with app.run_test() as pilot:
+        await wait_for_table(app)
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, RunsScreen)
+        table = app.screen.query_one("#runs", DataTable)
+        await wait_for(lambda: table.row_count == 5)
+        row = [str(c) for c in table.get_row_at(0)]
+        assert row[6:9] == ["", "12", ""]  # duration, turns, cost
+        assert app.error is None
+        await pilot.press("escape")

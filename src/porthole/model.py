@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from math import isfinite
 from typing import Any
 
 RUN_STATES = ("running", "done", "failed", "stopped", "waiting", "lost", "unknown")
@@ -29,6 +30,12 @@ LEFTOVER_WIDTH = 200
 # The widest count any cell will show. A box is free to report `1e999` or a 4000-digit number;
 # a column is not free to be 4000 characters wide.
 COUNT_MAX = 99_999
+# The same cap for the other numbers a run reports, one per cell shape: mm:ss stays eight
+# characters wide (the cap is a little under 70 days), a cost nine. An exit status is bounded
+# in width only, never pulled towards zero: `0` is the one value that means the run succeeded.
+SECONDS_MAX = 5_999_999
+COST_MAX = 99_999.99
+EXIT_MAX = 99_999
 
 
 @dataclass(frozen=True)
@@ -47,16 +54,23 @@ class Run:
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> Run:
+        """Every number clamped by the same helper the counts use, for the same reason.
+
+        A run's numbers come from the guest, so a string, a list or `1e999` can arrive in any
+        of them. Coercing here rather than in the formatter is what keeps one mis-shaped run
+        from stopping every other box's row from updating: `int("0.43")` raises, and the raise
+        lands in the render of the whole table.
+        """
         return cls(
             id=str(data.get("id", "")),
             state=str(data.get("state", "")),
-            exit=data.get("exit"),
+            exit=_whole(data.get("exit"), EXIT_MAX, -EXIT_MAX),
             model=data.get("model"),
             branch=data.get("branch"),
             started_at=data.get("started_at"),
-            elapsed_s=data.get("elapsed_s"),
-            turns=data.get("turns"),
-            cost_usd=data.get("cost_usd"),
+            elapsed_s=_clamped(data.get("elapsed_s"), 0, SECONDS_MAX),
+            turns=_whole(data.get("turns")),
+            cost_usd=_clamped(data.get("cost_usd"), 0, COST_MAX),
             last_tool=data.get("last_tool"),
             last_text=data.get("last_text"),
         )
@@ -81,7 +95,7 @@ class Session:
         produced = data.get("produced")
         return cls(
             name=str(data.get("name", "")),
-            age_s=data.get("age_s"),
+            age_s=_clamped(data.get("age_s"), 0, SECONDS_MAX),
             kind=kind if kind in SESSION_KINDS else "other",
             runid=_optional_str(data.get("runid")),
             state=str(data.get("state") or "unknown"),
@@ -408,18 +422,52 @@ def _optional_str(value: Any) -> str | None:
     return text or None
 
 
+def _numeric(value: Any) -> int | float | None:
+    """A guest-supplied value as a number a cell can show, or None. Never raises.
+
+    `1e999` is valid JSON and Python reads it as `inf`, whose `int()` raises OverflowError, not
+    ValueError; NaN survives every comparison and so survives a clamp. Both are numbers no cell
+    can show, so both land on None. A 4001-digit integer is exact and is kept: the caller's
+    clamp is what keeps the column narrow.
+    """
+    if isinstance(value, str):
+        try:
+            value = float(value)
+        except ValueError:
+            return None
+    elif not isinstance(value, (int, float)):
+        return None  # None, a list, a dict, an object: not a number at all
+    if isinstance(value, float) and not isfinite(value):
+        return None
+    return value
+
+
+def _clamped(value: Any, low: float, high: float) -> float | None:
+    """Every number the table shows passes through here: parsed, bounded, never raising.
+
+    None is "there is no number", which the callers below turn into a zero count or an empty
+    cell — different claims, and a cell must not make the wrong one.
+    """
+    number = _numeric(value)
+    return None if number is None else float(min(max(low, number), high))
+
+
 def _count(value: Any) -> int:
     """A count from the CLI, never an exception. A string, a float, None or a list lands on an int.
 
-    A bad cell is a bug report; a poll that raises is a blackout of the whole table. `1e999` is
-    valid JSON and Python reads it as `inf`, whose `int()` raises OverflowError, not ValueError.
+    A bad cell is a bug report; a poll that raises is a blackout of the whole table.
     """
     if isinstance(value, (list, tuple)):
         return min(len(value), COUNT_MAX)
-    try:
-        return min(max(0, int(value or 0)), COUNT_MAX)
-    except (TypeError, ValueError, OverflowError):
-        return 0
+    number = _clamped(value, 0, COUNT_MAX)
+    return 0 if number is None else int(number)
+
+
+def _whole(value: Any, high: int = COUNT_MAX, low: int = 0) -> int | None:
+    """`_count`'s clamp with absence kept: a run with no result event has no turn count, and an
+    empty cell says so where a fabricated `0` would state a number the box never reported."""
+    number = _clamped(value, low, high)
+    return None if number is None else int(number)
 
 
 def _as_list(value: Any) -> list[Any]:
@@ -458,30 +506,37 @@ def parse_iso(value: str | None) -> datetime | None:
     return stamp
 
 
-def fmt_elapsed(seconds: float | None) -> str:
-    """mm:ss; minutes keep growing past 59 rather than rolling into hours."""
-    if seconds is None:
+def fmt_elapsed(seconds: Any) -> str:
+    """mm:ss; minutes keep growing past 59 rather than rolling into hours.
+
+    Takes whatever the CLI sent, not only a number: the runs modal formats raw JSON values
+    (`app.py` `RunsScreen._cells`), so the clamp has to be here as well as in `Run.from_json`.
+    """
+    total = _whole(seconds, SECONDS_MAX)
+    if total is None:
         return ""
-    total = int(seconds)
     return f"{total // 60:02d}:{total % 60:02d}"
 
 
-def fmt_age(seconds: float | None) -> str:
-    if seconds is None:
+def fmt_age(seconds: Any) -> str:
+    age = _clamped(seconds, 0, SECONDS_MAX)
+    if age is None:
         return "?"
-    if seconds < 60:
-        return f"{int(seconds)}s ago"
-    if seconds < 3600:
-        return f"{int(seconds // 60)}m ago"
-    return f"{seconds / 3600:.1f}h ago"
+    if age < 60:
+        return f"{int(age)}s ago"
+    if age < 3600:
+        return f"{int(age // 60)}m ago"
+    return f"{age / 3600:.1f}h ago"
 
 
-def fmt_cost(cost: float | None) -> str:
-    return "" if cost is None else f"${cost:.2f}"
+def fmt_cost(cost: Any) -> str:
+    amount = _clamped(cost, 0, COST_MAX)
+    return "" if amount is None else f"${amount:.2f}"
 
 
-def fmt_turns(turns: int | None) -> str:
-    return "" if turns is None else str(turns)
+def fmt_turns(turns: Any) -> str:
+    count = _whole(turns)
+    return "" if count is None else str(count)
 
 
 def egress_mode(value: Any) -> str:

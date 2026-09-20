@@ -2,14 +2,21 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from typing import Any
 
 from porthole.model import (
+    COST_MAX,
+    COUNT_MAX,
     EGRESS_MODES,
+    EXIT_MAX,
     RUN_STATES,
+    SECONDS_MAX,
+    TOOLCHAIN_STATES,
     Box,
     Channel,
     Event,
     Leftovers,
+    Run,
     Session,
     Standing,
     Status,
@@ -20,6 +27,7 @@ from porthole.model import (
     fmt_age,
     fmt_cost,
     fmt_elapsed,
+    fmt_turns,
     parse_iso,
     run_state_style,
     standing_style,
@@ -152,6 +160,21 @@ def test_leftovers_total_and_summary() -> None:
     assert Box.from_json({**BASE, "leftovers": {"ports": "tcp:1"}}).leftovers == Leftovers()
 
 
+def test_toolchain_accepts_exactly_the_three_contract_words() -> None:
+    """2.1 says `ok | findings | unknown`. Anything else is `unknown`, and nothing raises."""
+    assert TOOLCHAIN_STATES == ("ok", "findings", "unknown")
+    for state in TOOLCHAIN_STATES:
+        assert Toolchain.from_json({"state": state}).state == state
+        assert Box.from_json({**BASE, "toolchain": {"state": state}}).toolchain == Toolchain(state)
+    for other in ("project_mismatch", "OK", " ok", "ok ", "", "pwned", None, 5, [], {}, ["ok"]):
+        assert Toolchain.from_json({"state": other}).state == "unknown"
+        box = Box.from_json({**BASE, "toolchain": {"state": other, "missing": 1}})
+        assert box.toolchain is not None
+        assert box.toolchain.state == "unknown" and not box.toolchain.has_findings
+        assert box.toolchain.summary == "1 missing"  # an unreadable verdict, a readable count
+    assert Toolchain.from_json({}).state == "unknown"  # the key absent is nobody answering
+
+
 def test_toolchain_state_and_summary() -> None:
     ok = Toolchain.from_json({"state": "ok", "missing": 0, "off_pin": 0, "checked_at": "2026-09"})
     assert not ok.has_findings and ok.summary == "" and ok.checked_at == "2026-09"
@@ -211,6 +234,55 @@ def test_count_coercion() -> None:
     assert _count(float("-inf")) == 0
     assert _count(float("nan")) == 0
     assert _count(10**4000) == 99999  # a count is clamped, never a 4001-character cell
+
+
+def a_run(**numbers: Any) -> Run:
+    """A run whose four numbers are whatever the test hands it, id and state aside."""
+    return Run.from_json({"id": "R", "state": "done", **numbers})
+
+
+def test_run_numbers_go_through_the_same_clamp_as_the_counts() -> None:
+    """A run's numbers are guest-supplied like every count, and every one of them could raise.
+
+    `int("nope")`, `int(inf)` and `f"{['x']:.2f}"` all raise, all inside the render of the whole
+    table, so a single mis-shaped run blacked out every box's row.
+    """
+    spelled = a_run(exit="0", elapsed_s="427", turns=12.9, cost_usd="0.4312")
+    assert (spelled.exit, spelled.elapsed_s, spelled.turns) == (0, 427.0, 12)
+    assert spelled.cost_usd == 0.4312
+    for junk in ("nope", "", [], {}, ["1"], None, float("inf"), float("-inf"), float("nan")):
+        run = a_run(exit=junk, elapsed_s=junk, turns=junk, cost_usd=junk)
+        assert (run.exit, run.elapsed_s, run.turns, run.cost_usd) == (None, None, None, None), junk
+        # No number to show is an empty cell, never a fabricated zero.
+        cells = (fmt_elapsed(run.elapsed_s), fmt_turns(run.turns), fmt_cost(run.cost_usd))
+        assert cells == ("", "", ""), junk
+    huge = a_run(exit=10**4000, elapsed_s=10**4000, turns=10**4000, cost_usd=10**4000)
+    assert (huge.elapsed_s, huge.turns, huge.cost_usd, huge.exit) == (
+        float(SECONDS_MAX),
+        COUNT_MAX,
+        COST_MAX,
+        EXIT_MAX,
+    )
+    assert fmt_elapsed(huge.elapsed_s) == "99999:59"  # clamped, never a 4001-character cell
+    assert fmt_cost(huge.cost_usd) == "$99999.99"
+    negative = a_run(exit=-9, elapsed_s=-5, turns=-1, cost_usd=-1.5)
+    assert negative.exit == -9  # a signal keeps its sign: 0 is the one value meaning success
+    assert (negative.elapsed_s, negative.turns, negative.cost_usd) == (0.0, 0, 0.0)
+
+
+def test_the_formatters_take_whatever_the_cli_sent() -> None:
+    """The runs modal formats raw JSON values, so the clamp lives in the formatter too."""
+    assert fmt_elapsed("427") == "07:07" and fmt_elapsed("nope") == ""
+    assert fmt_elapsed(float("inf")) == "" and fmt_elapsed([]) == ""
+    assert fmt_turns("12") == "12" and fmt_turns({}) == "" and fmt_turns(float("nan")) == ""
+    assert fmt_cost("0.4312") == "$0.43" and fmt_cost(["0.43"]) == ""
+    assert fmt_age("600") == "10m ago" and fmt_age("nope") == "?" and fmt_age(float("inf")) == "?"
+
+
+def test_a_hostile_session_age_is_a_number_or_nothing() -> None:
+    assert Session.from_json({"name": "s", "age_s": "427"}).age_s == 427.0
+    for junk in ("nope", [], {}, float("inf"), None):
+        assert Session.from_json({"name": "s", "age_s": junk}).age_s is None
 
 
 def test_a_hostile_count_does_not_raise_anywhere_in_from_json() -> None:
