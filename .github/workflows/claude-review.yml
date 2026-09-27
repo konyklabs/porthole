@@ -1,0 +1,23 @@
+name: claude review
+
+# On demand, not on every push. The local lens round is the review (the
+# workspace's agentic-sdlc.md); this gate is a second, independent opinion a
+# change asks for by adding the `gate` label to its pull request -- and asks
+# for again, after a push, by removing and re-adding it. Measured before this
+# change: about 24 minutes and six Claude sessions per push
+# (konyklabs/roadmap#103).
+on:
+  pull_request:
+    types: [labeled]
+
+jobs:
+  review:
+    if: github.event.label.name == 'gate'
+    # Callers must grant explicitly: org default token permissions are
+    # read-only, and a called workflow can't exceed its caller's grant.
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    uses: konyklabs/.github/.github/workflows/claude-review.yml@main
+    secrets: inherit
