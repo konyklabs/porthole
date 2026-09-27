@@ -1,0 +1,23 @@
+name: release
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  release-please:
+    if: github.event_name == 'push'
+    permissions:
+      contents: write
+      pull-requests: write
+    # No `with: release-type`: manifest mode, so release-please reads
+    # release-please-config.json (bump-minor-pre-major) and
+    # .release-please-manifest.json (konyklabs/roadmap#106).
+    uses: konyklabs/.github/.github/workflows/release-please.yml@7732746c0816462eaf38ecad47e58bb54fdf3500 # main
+
+  # No build or publish job: this repository is installed from a checkout or
+  # from git, never from a package registry, so there is nothing to upload.
+  # release-please alone gives it a version, a changelog and a GitHub release
+  # with a tag on every conventional-commit push to main. Publishing to a
+  # registry would be a separate decision, taken by the owner, not a job
+  # added here.

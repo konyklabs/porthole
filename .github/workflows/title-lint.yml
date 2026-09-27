@@ -1,0 +1,9 @@
+name: title lint
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize]
+
+jobs:
+  lint:
+    uses: konyklabs/.github/.github/workflows/title-lint.yml@main

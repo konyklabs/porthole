@@ -1,0 +1,10 @@
+name: proprietary scan
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  scan:
+    secrets: inherit
+    uses: konyklabs/.github/.github/workflows/proprietary-scan.yml@main
